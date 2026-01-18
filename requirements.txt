@@ -1,0 +1,8 @@
+torch 
+torchaudio 
+transformers 
+numpy 
+onnxruntime 
+funasr
+llama-cpp-python
+pydub

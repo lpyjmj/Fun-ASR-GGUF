@@ -57,8 +57,8 @@ INPUT_AUDIO = os.path.join(SCRIPT_DIR, "input.mp3")
 # ASR Prompts
 hotwords = '睡前消息, Claude Code'
 PREFIX_PROMPT = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n"
-PREFIX_PROMPT += f"请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n"
-PREFIX_PROMPT += f"热词列表：[{hotwords}]\n"
+# PREFIX_PROMPT += f"请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n"
+# PREFIX_PROMPT += f"热词列表：[{hotwords}]\n"
 PREFIX_PROMPT += "\n语音转写：\n"
 SUFFIX_PROMPT = "\n<|im_end|>\n<|im_start|>assistant"
 STOP_TOKENS = [151643, 151645]

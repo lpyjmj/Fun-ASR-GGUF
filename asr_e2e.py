@@ -630,19 +630,21 @@ def prepare_prompt_embeddings(vocab, embedding_table, matched_hotwords=None, lan
     """步骤 6: 生成 Prompt"""
     print(f"\n[6] 生成 Prompt (语言: {language})")
     
-    PREFIX_PROMPT = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n"
-    SUFFIX_PROMPT = "<|im_end|>\n<|im_start|>assistant"
+    PREFIX_PROMPT = "<|im_start|>system\n'
+    PREFIX_PROMPT += 'You are a helpful assistant."
+    PREFIX_PROMPT += '<|im_end|>\n<|im_start|>user\n"
 
     if matched_hotwords:
         hotwords = ", ".join(matched_hotwords)
         PREFIX_PROMPT += f"请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。\n\n\n**上下文信息：**\n\n\n"
         PREFIX_PROMPT += f"热词列表：[{hotwords}]\n"
     
-    # 语言设置 - 对齐官方实现 (model.py:564-568)
     if language is None:
         PREFIX_PROMPT += "语音转写："
     else:
         PREFIX_PROMPT += f"语音转写成{language}："
+        
+    SUFFIX_PROMPT = "<|im_end|>\n<|im_start|>assistant\n"
     
     prefix_tokens = text_to_tokens(vocab, PREFIX_PROMPT)
     suffix_tokens = text_to_tokens(vocab, SUFFIX_PROMPT)

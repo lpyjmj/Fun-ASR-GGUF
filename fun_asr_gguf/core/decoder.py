@@ -54,78 +54,45 @@ class LLMDecoder:
         t_inject_start = time.perf_counter()
         
         # 1. Inject
-        mem = llama.llama_get_memory(self.models.ctx)
-        llama.llama_memory_clear(mem, True)
+        self.models.ctx.clear_kv_cache()
         
-        batch_embd = llama.llama_batch_init(n_input_tokens, full_embd.shape[1], 1)
-        batch_embd.n_tokens = n_input_tokens
-        batch_embd.token = ctypes.cast(None, ctypes.POINTER(llama.llama_token))
-        
-        if not full_embd.flags['C_CONTIGUOUS']:
-            full_embd = np.ascontiguousarray(full_embd)
-        ctypes.memmove(batch_embd.embd, full_embd.ctypes.data, full_embd.nbytes)
+        batch_embd = llama.LlamaBatch(n_input_tokens, full_embd.shape[1], 1)
+        batch_embd.set_embd(full_embd)
+        batch_embd.struct.token = ctypes.cast(None, ctypes.POINTER(llama.llama_token))
 
-        for k in range(n_input_tokens):
-            batch_embd.pos[k] = k
-            batch_embd.n_seq_id[k] = 1
-            batch_embd.seq_id[k][0] = 0
-            batch_embd.logits[k] = 1 if k == n_input_tokens - 1 else 0
-
-        ret = llama.llama_decode(self.models.ctx, batch_embd)
-        llama.llama_batch_free(batch_embd)
+        ret = self.models.ctx.decode(batch_embd)
         if ret != 0: raise RuntimeError(f"Decode failed (ret={ret})")
         
         t_inject = time.perf_counter() - t_inject_start
 
         # 2. Generation Loop
         t_gen_start = time.perf_counter()
-        vocab_size = llama.llama_vocab_n_tokens(self.models.vocab)
-        batch_text = llama.llama_batch_init(1, 0, 1)
-        batch_text.n_tokens = 1
+        batch_text = llama.LlamaBatch(1, 0, 1)
 
-        generated_text = ""
         current_pos = n_input_tokens
-        decoder_utf8 = llama.ByteDecoder()
-        tokens_generated = 0
-        smpl = llama.create_sampler(temperature=temperature, top_k=top_k, top_p=top_p)
-
-        for _ in range(n_predict):
-            # 使用面向对象接口采样
-            token_id = smpl.sample(self.models.ctx, -1)
-
-            if token_id == self.models.eos_token or token_id in self.stop_tokens:
-                break
-
-            raw_bytes = llama.token_to_bytes(self.models.vocab, token_id)
-            text_piece = decoder_utf8.decode(raw_bytes)
-            generated_text += text_piece
-            tokens_generated += 1
-
-            if stream_output:
-                if reporter: reporter.stream(text_piece)
-                else: print(text_piece, end="", flush=True)
-
-            batch_text.token[0] = token_id
-            batch_text.pos[0] = current_pos
-            batch_text.n_seq_id[0] = 1
-            batch_text.seq_id[0][0] = 0
-            batch_text.logits[0] = 1
-
-            if llama.llama_decode(self.models.ctx, batch_text) != 0: break
-            current_pos += 1
-
-        smpl.free()
+        asr_decoder = llama.ASRStreamDecoder(self.models.vocab, reporter if stream_output else None)
         
-        remaining = decoder_utf8.flush()
-        generated_text += remaining
-        if stream_output and remaining:
-            if reporter: reporter.stream(remaining)
-            else: print(remaining, end="", flush=True)
+        with llama.LlamaSampler(temperature=temperature, top_k=top_k, top_p=top_p) as smpl:
+            for _ in range(n_predict):
+                # 使用面向对象接口采样
+                token_id = smpl.sample(self.models.ctx, -1)
 
-        llama.llama_batch_free(batch_text)
+                if token_id == self.models.eos_token or token_id in self.stop_tokens:
+                    break
+
+                # 集成化处理新 Token：解码字节 -> 拼接 -> 实时汇报
+                asr_decoder.push(token_id)
+
+                if self.models.ctx.decode_token(batch_text, token_id, current_pos) != 0:
+                    break
+                current_pos += 1
+        
+        asr_decoder.flush()
+
+        # batch_text 会由 __del__ 自动释放
         t_gen = time.perf_counter() - t_gen_start
         
-        return generated_text, tokens_generated, t_inject, t_gen
+        return asr_decoder.generated_text, asr_decoder.tokens_generated, t_inject, t_gen
 
 class StreamDecoder:
     """协调完整流程的解码器"""

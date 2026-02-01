@@ -49,12 +49,10 @@ class ModelManager:
 
             # 2. GGUF
             vprint("[2/6] 加载 GGUF LLM Decoder...", verbose)
-            self.model = llama.load_model(self.config.decoder_gguf_path)
-            if not self.model:
-                raise RuntimeError("Failed to load GGUF model")
+            self.model = llama.LlamaModel(self.config.decoder_gguf_path)
             
-            self.vocab = llama.llama_model_get_vocab(self.model)
-            self.eos_token = llama.llama_vocab_eos(self.vocab)
+            self.vocab = self.model.vocab
+            self.eos_token = self.model.eos_token
 
             # 3. Embeddings
             vprint("[3/6] 加载 Embedding 权重...", verbose)
@@ -62,7 +60,7 @@ class ModelManager:
             
             # 4. Context
             vprint("[4/6] 创建 LLM 上下文...", verbose)
-            self.ctx = llama.create_context(
+            self.ctx = llama.LlamaContext(
                 self.model,
                 n_ctx=2048,
                 n_batch=2048,
@@ -103,11 +101,7 @@ class ModelManager:
     def cleanup(self):
         if self.hotword_manager:
             self.hotword_manager.stop_file_watcher()
-        if self.ctx:
-            llama.llama_free(self.ctx)
-            self.ctx = None
-        if self.model:
-            llama.llama_model_free(self.model)
-            llama.llama_backend_free()
-            self._initialized = False
-            print("[ASR] 资源已释放")
+        self.ctx = None   # 自动调用 __del__ 释放
+        self.model = None # 自动调用 __del__ 释放
+        self._initialized = False
+        print("[ASR] 资源已释放")

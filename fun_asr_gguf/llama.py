@@ -84,6 +84,12 @@ class llama_sampler_chain_params(ctypes.Structure):
         ("no_perf", ctypes.c_bool),
     ]
 
+class llama_logit_bias(ctypes.Structure):
+    _fields_ = [
+        ("token", llama_token),
+        ("bias", ctypes.c_float),
+    ]
+
 class llama_batch(ctypes.Structure):
     _fields_ = [
         ("n_tokens", ctypes.c_int32),
@@ -152,6 +158,7 @@ def init_llama_lib():
     global llama_sampler_chain_default_params, llama_sampler_chain_init, llama_sampler_chain_add
     global llama_sampler_init_greedy, llama_sampler_init_dist, llama_sampler_init_temp
     global llama_sampler_init_top_k, llama_sampler_init_top_p, llama_sampler_sample, llama_sampler_free
+    global llama_sampler_init_logit_bias
     global _log_callback_ref
 
     if llama is not None:
@@ -338,6 +345,10 @@ def init_llama_lib():
         llama_sampler_free = llama.llama_sampler_free
         llama_sampler_free.argtypes = [ctypes.c_void_p]
         llama_sampler_free.restype = None
+
+        llama_sampler_init_logit_bias = llama.llama_sampler_init_logit_bias
+        llama_sampler_init_logit_bias.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.POINTER(llama_logit_bias)]
+        llama_sampler_init_logit_bias.restype = ctypes.c_void_p
     except AttributeError:
         # 版本较旧的 llama.cpp 可能没有这些导出
         logger.warning("llama.cpp 库中缺少原生采样 API，将无法使用原生采样优化。")
@@ -402,60 +413,306 @@ def create_context(model, n_ctx=2048, n_batch=2048, n_ubatch=512, n_seq_max=1,
 
     return llama_init_from_model(model, params)
 
-def create_batch(n_tokens, embd_dim=0, n_seq_max=1):
-    """创建推理用的 Batch"""
-    return llama_batch_init(n_tokens, embd_dim, n_seq_max)
+class LlamaModel:
+    """模型的面向对象封装"""
+    def __init__(self, path, n_gpu_layers=-1):
+        init_llama_lib()
+        self.path = path
+        self.params = llama_model_default_params()
+        if n_gpu_layers != -1:
+            self.params.n_gpu_layers = n_gpu_layers
+        
+        lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+        model_path_obj = Path(path).resolve()
+        try:
+            model_rel = relpath(model_path_obj, lib_dir)
+        except ValueError:
+            model_rel = model_path_obj.as_posix()
+
+        original_cwd = os.getcwd()
+        os.chdir(lib_dir)
+        try:
+            self.ptr = llama_model_load_from_file(model_rel.encode('utf-8'), self.params)
+        finally:
+            os.chdir(original_cwd)
+
+        if not self.ptr:
+            raise RuntimeError(f"模型加载失败: {path}")
+            
+        self.vocab = llama_model_get_vocab(self.ptr)
+        self.n_embd = llama_model_n_embd(self.ptr)
+        self.eos_token = llama_vocab_eos(self.vocab)
+
+    def tokenize(self, text, add_special=False, parse_special=True):
+        return text_to_tokens(self.vocab, text)
+
+    def token_to_bytes(self, token_id):
+        return token_to_bytes(self.vocab, token_id)
+
+    def __del__(self):
+        if hasattr(self, 'ptr') and self.ptr:
+            llama_model_free(self.ptr)
+            self.ptr = None
+
+class LlamaContext:
+    """上下文的面向对象封装"""
+    def __init__(self, model, n_ctx=2048, n_batch=2048, n_ubatch=512, n_seq_max=1, 
+                 embeddings=False, pooling_type=0, flash_attn=True, 
+                 offload_kqv=True, no_perf=True, n_threads=None):
+        self.model = model # 保持模型引用防止被释放
+        params = llama_context_default_params()
+        params.n_ctx = n_ctx
+        params.n_batch = n_batch
+        params.n_ubatch = n_ubatch
+        params.n_seq_max = n_seq_max
+        params.embeddings = embeddings
+        params.pooling_type = pooling_type
+        params.flash_attn_type = 1 if flash_attn else 0
+        params.offload_kqv = offload_kqv
+        params.no_perf = no_perf
+        
+        if n_threads:
+            params.n_threads = n_threads
+            params.n_threads_batch = n_threads
+        else:
+            params.n_threads = os.cpu_count() // 2
+            params.n_threads_batch = os.cpu_count()
+
+        self.ptr = llama_init_from_model(model.ptr, params)
+        if not self.ptr:
+            raise RuntimeError("上下文初始化失败")
+
+    def decode(self, batch):
+        return llama_decode(self.ptr, batch.struct)
+
+    def decode_token(self, batch, token_id, pos, seq_id=0):
+        """
+        原子操作：设置单 Token Batch 并执行解码
+        """
+        batch.set_token(token_id, pos, seq_id)
+        return self.decode(batch)
+
+    def get_logits(self):
+        return llama_get_logits(self.ptr)
+
+    def clear_kv_cache(self):
+        mem = llama_get_memory(self.ptr)
+        llama_memory_clear(mem, True)
+
+    def __del__(self):
+        if hasattr(self, 'ptr') and self.ptr:
+            llama_free(self.ptr)
+            self.ptr = None
+
+class LlamaBatch:
+    """Batch 的面向对象封装，支持直接属性访问"""
+    def __init__(self, n_tokens, embd_dim=0, n_seq_max=1):
+        self.struct = llama_batch_init(n_tokens, embd_dim, n_seq_max)
+        self.n_tokens_max = n_tokens
+
+    @property
+    def n_tokens(self): return self.struct.n_tokens
+    @n_tokens.setter
+    def n_tokens(self, val): self.struct.n_tokens = val
+
+    @property
+    def token(self): return self.struct.token
+    @property
+    def embd(self): return self.struct.embd
+    @property
+    def pos(self): return self.struct.pos
+    @property
+    def n_seq_id(self): return self.struct.n_seq_id
+    @property
+    def seq_id(self): return self.struct.seq_id
+    @property
+    def logits(self): return self.struct.logits
+
+    def set_embd(self, data: np.ndarray, pos_offset: int = 0, seq_id: int = 0):
+        """
+        高阶接口：直接注入 Embedding 数据并初始化位置信息
+        """
+        n_tokens = data.shape[0]
+        if n_tokens > self.n_tokens_max:
+            raise ValueError(f"Batch 空间不足: {n_tokens} > {self.n_tokens_max}")
+        
+        # 1. 内存移动
+        if not data.flags['C_CONTIGUOUS']:
+            data = np.ascontiguousarray(data)
+        ctypes.memmove(self.embd, data.ctypes.data, data.nbytes)
+        
+        # 2. 设置元数据
+        self.n_tokens = n_tokens
+        # 批量设置属性以提高性能
+        for i in range(n_tokens):
+            self.pos[i] = pos_offset + i
+            self.n_seq_id[i] = 1
+            self.seq_id[i][0] = seq_id
+            self.logits[i] = 1 if i == n_tokens - 1 else 0
+        
+        return self
+
+    def set_token(self, token_id, pos, seq_id=0, logits=True):
+        """
+        高阶接口：设置 Batch 中的单个 Token
+        """
+        self.n_tokens = 1
+        self.struct.token[0] = token_id
+        self.pos[0] = pos
+        self.n_seq_id[0] = 1
+        self.seq_id[0][0] = seq_id
+        self.logits[0] = 1 if logits else 0
+        return self
+
+    def __del__(self):
+        if hasattr(self, 'struct'):
+            llama_batch_free(self.struct)
+
 
 class LlamaSampler:
     """采样器的面向对象封装"""
-    def __init__(self, ptr):
-        self.ptr = ptr
+    def __init__(self, temperature=0.8, top_k=50, top_p=1.0, seed=None, logit_bias=None, n_vocab=0):
+        import time
+        if seed is None:
+            seed = int(time.time())
+            
+        sparams = llama_sampler_chain_default_params()
+        self.ptr = llama_sampler_chain_init(sparams)
+        
+        # Logit Bias (支持范围/掩码)
+        if logit_bias and n_vocab > 0 and isinstance(logit_bias, dict):
+            n_bias = len(logit_bias)
+            BiasArray = llama_logit_bias * n_bias
+            bias_data = BiasArray()
+            
+            for i, (token, bias) in enumerate(logit_bias.items()):
+                bias_data[i].token = token
+                bias_data[i].bias = bias
+            
+            llama_sampler_chain_add(self.ptr, llama_sampler_init_logit_bias(n_vocab, n_bias, bias_data))
 
-    def sample(self, ctx, idx=-1):
-        """采样一个 Token"""
-        return llama_sampler_sample(self.ptr, ctx, idx)
+        if temperature > 0:
+            llama_sampler_chain_add(self.ptr, llama_sampler_init_top_k(top_k))
+            llama_sampler_chain_add(self.ptr, llama_sampler_init_top_p(top_p, 1))
+            llama_sampler_chain_add(self.ptr, llama_sampler_init_temp(temperature))
+            llama_sampler_chain_add(self.ptr, llama_sampler_init_dist(seed))
+        else:
+            llama_sampler_chain_add(self.ptr, llama_sampler_init_greedy())
+
+        self._neg_inf = -1e9
+
+    def sample(self, ctx, idx=-1, limit_start=None, limit_end=None):
+        """
+        采样一个 Token
+        
+        Args:
+            limit_start (int, optional): 限制采样范围的起始 Index (包含)
+            limit_end (int, optional): 限制采样范围的结束 Index (不包含)
+        """
+        ctx_ptr = ctx
+        if hasattr(ctx, 'ptr'):
+            ctx_ptr = ctx.ptr
+            
+        # 动态范围限制 (直接操作 Logits 内存，极速)
+        if (limit_start is not None or limit_end is not None) and hasattr(ctx, 'get_logits') and hasattr(ctx, 'model'):
+            # 需要获取 n_vocab
+            # LlamaContext -> LlamaModel -> vocab -> n_tokens
+            if hasattr(ctx.model, 'vocab'):
+                n_vocab = llama_vocab_n_tokens(ctx.model.vocab)
+                
+                # 获取 Logits Numpy View
+                logits_ptr = ctx.get_logits()
+                logits = np.ctypeslib.as_array(logits_ptr, shape=(n_vocab,))
+                
+                # In-place 修改
+                # 注意：这会修改 ctx 中的 logits，影响本次采样。
+                # 下一次 decode 会覆盖，所以是安全的。
+                
+                s = max(0, limit_start) if limit_start is not None else 0
+                e = min(n_vocab, limit_end) if limit_end is not None else n_vocab
+                
+                if s > 0:
+                    logits[0:s] = self._neg_inf
+                if e < n_vocab:
+                    logits[e:] = self._neg_inf
+        
+        return llama_sampler_sample(self.ptr, ctx_ptr, idx)
 
     def free(self):
         """释放采样器资源"""
-        if self.ptr:
+        if hasattr(self, 'ptr') and self.ptr:
             llama_sampler_free(self.ptr)
             self.ptr = None
 
-def create_sampler(temperature=0.8, top_k=50, top_p=1.0, seed=None):
-    """创建 ASR 专用的采样器对象"""
-    import time
-    if seed is None:
-        seed = int(time.time())
-        
-    sparams = llama_sampler_chain_default_params()
-    smpl_ptr = llama_sampler_chain_init(sparams)
-    
-    if temperature > 0:
-        llama_sampler_chain_add(smpl_ptr, llama_sampler_init_top_k(top_k))
-        llama_sampler_chain_add(smpl_ptr, llama_sampler_init_top_p(top_p, 1))
-        llama_sampler_chain_add(smpl_ptr, llama_sampler_init_temp(temperature))
-        llama_sampler_chain_add(smpl_ptr, llama_sampler_init_dist(seed))
-    else:
-        llama_sampler_chain_add(smpl_ptr, llama_sampler_init_greedy())
-        
-    return LlamaSampler(smpl_ptr)
+    def __enter__(self):
+        return self
 
-# =========================================================================
-# 日志回调
-# =========================================================================
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.free()
+
+    def __del__(self):
+        self.free()
+
+
+class ASRStreamDecoder:
+    """ASR 专属流式解码器，集成字节解码与 ASRReporter 交互"""
+    def __init__(self, vocab, reporter=None):
+        self.vocab = vocab
+        self.reporter = reporter
+        self.byte_decoder = ByteDecoder()
+        self.generated_text = ""
+        self.tokens_generated = 0
+
+    def push(self, token_id: int):
+        """推入 Token，返回新解码的文字片段"""
+        raw_bytes = token_to_bytes(self.vocab, token_id)
+        text_piece = self.byte_decoder.decode(raw_bytes)
+        
+        self.generated_text += text_piece
+        self.tokens_generated += 1
+        
+        if self.reporter:
+            self.reporter.stream(text_piece)
+            
+        return text_piece
+
+    def flush(self):
+        """清空残余字节并返回"""
+        remaining = self.byte_decoder.flush()
+        self.generated_text += remaining
+        return remaining
+
 
 def python_log_callback(level, message, user_data):
+    """
+    llama.cpp 日志回调函数
+    level: 
+        2 = ERROR
+        3 = WARN
+        4 = INFO
+        5 = DEBUG
+    """
     if not message: return
     try:
         msg_str = message.decode('utf-8', errors='replace').strip()
         if not msg_str or msg_str in ['.', '\n']: return
         
-        if level == 2: logger.error(f"[llama.cpp] {msg_str}")
-        elif level == 3: logger.warning(f"[llama.cpp] {msg_str}")
-        else: logger.info(f"[llama.cpp] {msg_str}")
-    except Exception: pass
+        if level == 2:
+            logger.error(f"[llama.cpp] {msg_str}")
+        elif level == 3:
+            logger.warning(f"[llama.cpp] {msg_str}")
+        elif level == 4:
+            logger.info(f"[llama.cpp] {msg_str}")
+        elif level >= 5:
+            logger.debug(f"[llama.cpp] {msg_str}")
+        else:
+            logger.info(f"[llama.cpp] {msg_str}")
+    except Exception as e:
+        # 防止回调错误导致程序崩溃
+        print(f"日志回调出错: {e}")
 
 def configure_logging(quiet=False):
+    """配置 llama.cpp 日志回调"""
     global _log_callback_ref
     if not llama_log_set: return
     
@@ -464,6 +721,7 @@ def configure_logging(quiet=False):
         _log_callback_ref = LOG_CALLBACK(python_log_callback)
         llama_log_set(_log_callback_ref, None)
     else:
+        # 如果需要静默，可以传递一个空函数，或者将 logger 级别调高
         _log_callback_ref = LOG_CALLBACK(lambda l, m, u: None)
         llama_log_set(_log_callback_ref, None)
 

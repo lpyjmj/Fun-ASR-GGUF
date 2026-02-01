@@ -3,7 +3,7 @@ import ctypes
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 
-from .. import nano_llama
+from .. import llama
 from ..nano_ctc import decode_ctc, align_timestamps
 from ..nano_onnx import encode_audio
 from ..utils import vprint
@@ -51,12 +51,12 @@ class LLMDecoder:
         t_inject_start = time.perf_counter()
         
         # 1. Inject
-        mem = nano_llama.llama_get_memory(self.models.ctx)
-        nano_llama.llama_memory_clear(mem, True)
+        mem = llama.llama_get_memory(self.models.ctx)
+        llama.llama_memory_clear(mem, True)
         
-        batch_embd = nano_llama.llama_batch_init(n_input_tokens, full_embd.shape[1], 1)
+        batch_embd = llama.llama_batch_init(n_input_tokens, full_embd.shape[1], 1)
         batch_embd.n_tokens = n_input_tokens
-        batch_embd.token = ctypes.cast(None, ctypes.POINTER(nano_llama.llama_token))
+        batch_embd.token = ctypes.cast(None, ctypes.POINTER(llama.llama_token))
         
         if not full_embd.flags['C_CONTIGUOUS']:
             full_embd = np.ascontiguousarray(full_embd)
@@ -68,32 +68,32 @@ class LLMDecoder:
             batch_embd.seq_id[k][0] = 0
             batch_embd.logits[k] = 1 if k == n_input_tokens - 1 else 0
 
-        ret = nano_llama.llama_decode(self.models.ctx, batch_embd)
-        nano_llama.llama_batch_free(batch_embd)
+        ret = llama.llama_decode(self.models.ctx, batch_embd)
+        llama.llama_batch_free(batch_embd)
         if ret != 0: raise RuntimeError(f"Decode failed (ret={ret})")
         
         t_inject = time.perf_counter() - t_inject_start
 
         # 2. Generation Loop
         t_gen_start = time.perf_counter()
-        vocab_size = nano_llama.llama_vocab_n_tokens(self.models.vocab)
-        batch_text = nano_llama.llama_batch_init(1, 0, 1)
+        vocab_size = llama.llama_vocab_n_tokens(self.models.vocab)
+        batch_text = llama.llama_batch_init(1, 0, 1)
         batch_text.n_tokens = 1
 
         generated_text = ""
         current_pos = n_input_tokens
-        decoder_utf8 = nano_llama.ByteDecoder()
+        decoder_utf8 = llama.ByteDecoder()
         tokens_generated = 0
 
         for _ in range(n_predict):
-            logits_ptr = nano_llama.llama_get_logits(self.models.ctx)
+            logits_ptr = llama.llama_get_logits(self.models.ctx)
             logits_arr = np.ctypeslib.as_array(logits_ptr, shape=(vocab_size,))
             token_id = int(np.argmax(logits_arr))
 
             if token_id == self.models.eos_token or token_id in self.stop_tokens:
                 break
 
-            raw_bytes = nano_llama.token_to_bytes(self.models.vocab, token_id)
+            raw_bytes = llama.token_to_bytes(self.models.vocab, token_id)
             text_piece = decoder_utf8.decode(raw_bytes)
             generated_text += text_piece
             tokens_generated += 1
@@ -108,7 +108,7 @@ class LLMDecoder:
             batch_text.seq_id[0][0] = 0
             batch_text.logits[0] = 1
 
-            if nano_llama.llama_decode(self.models.ctx, batch_text) != 0: break
+            if llama.llama_decode(self.models.ctx, batch_text) != 0: break
             current_pos += 1
 
         remaining = decoder_utf8.flush()
@@ -117,7 +117,7 @@ class LLMDecoder:
             if reporter: reporter.stream(remaining)
             else: print(remaining, end="", flush=True)
 
-        nano_llama.llama_batch_free(batch_text)
+        llama.llama_batch_free(batch_text)
         t_gen = time.perf_counter() - t_gen_start
         
         return generated_text, tokens_generated, t_inject, t_gen

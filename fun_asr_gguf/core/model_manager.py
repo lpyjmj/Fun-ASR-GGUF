@@ -4,7 +4,7 @@ import ctypes
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .. import nano_llama
+from .. import llama
 from ..nano_ctc import load_ctc_tokens
 from ..nano_onnx import load_onnx_models
 from ..hotword.manager import get_hotword_manager
@@ -49,21 +49,21 @@ class ModelManager:
 
             # 2. GGUF
             vprint("[2/6] 加载 GGUF LLM Decoder...", verbose)
-            nano_llama.init_llama_lib()
-            model_params = nano_llama.llama_model_default_params()
-            self.model = nano_llama.llama_model_load_from_file(
+            llama.init_llama_lib()
+            model_params = llama.llama_model_default_params()
+            self.model = llama.llama_model_load_from_file(
                 self.config.decoder_gguf_path.encode('utf-8'),
                 model_params
             )
             if not self.model:
                 raise RuntimeError("Failed to load GGUF model")
             
-            self.vocab = nano_llama.llama_model_get_vocab(self.model)
-            self.eos_token = nano_llama.llama_vocab_eos(self.vocab)
+            self.vocab = llama.llama_model_get_vocab(self.model)
+            self.eos_token = llama.llama_vocab_eos(self.vocab)
 
             # 3. Embeddings
             vprint("[3/6] 加载 Embedding 权重...", verbose)
-            self.embedding_table = nano_llama.get_token_embeddings_gguf(self.config.decoder_gguf_path)
+            self.embedding_table = llama.get_token_embeddings_gguf(self.config.decoder_gguf_path)
             
             # 4. Context
             vprint("[4/6] 创建 LLM 上下文...", verbose)

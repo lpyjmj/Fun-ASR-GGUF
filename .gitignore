@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+logs/
+
+# Models and Large Files
+model/
+Fun-ASR-Nano-2512/
+*.mp3
+*.wav
+*.srt
+
+# Environment
+.env
+.venv
+env/
+venv/

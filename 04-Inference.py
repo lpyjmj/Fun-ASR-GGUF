@@ -8,9 +8,9 @@ from fun_asr_gguf import create_asr_engine
 
 # ==================== Vulkan 选项 ====================
 
-# os.environ["VK_ICD_FILENAMES"] = "none"       # 禁止 Vulkan
-# os.environ["GGML_VK_VISIBLE_DEVICES"] = "0"   # 禁止 Vulkan 用独显（强制用集显）
-# os.environ["GGML_VK_DISABLE_F16"] = "1"       # 禁止 VulkanFP16 计算（Intel集显fp16有溢出问题）
+os.environ["VK_ICD_FILENAMES"] = "none"       # 禁止 Vulkan
+os.environ["GGML_VK_VISIBLE_DEVICES"] = "0"   # 禁止 Vulkan 用独显（强制用集显）
+os.environ["GGML_VK_DISABLE_F16"] = "1"       # 禁止 VulkanFP16 计算（Intel集显fp16有溢出问题）
 
 
 # ==================== 配置区域 ====================

@@ -18,7 +18,7 @@ ONNX 推理底层工具 - DirectML (DML) 性能优化指南
    提供物理长度信息，在输出端进对结果进行精确裁切，确保 100% 的识别精度。
 """
 
-def load_onnx_models(encoder_path, ctc_path, padding_secs=30):
+def load_onnx_models(encoder_path, ctc_path, padding_secs=60):
     """步骤 1: 加载 ONNX 音频编码器和 CTC Head 并进行热身"""
     # print("\n[1] 加载 ONNX Models (Encoder + CTC)...")
     
@@ -75,7 +75,7 @@ def load_onnx_models(encoder_path, ctc_path, padding_secs=30):
     t_cost = time.perf_counter() - t_start
     return encoder_sess, ctc_sess, t_cost
 
-def encode_audio(audio, encoder_sess, padding_secs=30):
+def encode_audio(audio, encoder_sess, padding_secs=60):
     """使用 ONNX Encoder 获取 LLM 嵌入和 CTC 特征，支持自动 Padding"""
     
     # Check expected input type

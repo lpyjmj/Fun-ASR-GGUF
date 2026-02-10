@@ -18,7 +18,7 @@ ONNX 推理底层工具 - DirectML (DML) 性能优化指南
    提供物理长度信息，在输出端进对结果进行精确裁切，确保 100% 的识别精度。
 """
 
-def load_onnx_models(encoder_path, ctc_path, padding_secs=30):
+def load_onnx_models(encoder_path, ctc_path, padding_secs=60):
     """步骤 1: 加载 ONNX 音频编码器和 CTC Head 并进行热身"""
     # print("\n[1] 加载 ONNX Models (Encoder + CTC)...")
     
@@ -75,7 +75,7 @@ def load_onnx_models(encoder_path, ctc_path, padding_secs=30):
     t_cost = time.perf_counter() - t_start
     return encoder_sess, ctc_sess, t_cost
 
-def encode_audio(audio, encoder_sess, padding_secs=2):
+def encode_audio(audio, encoder_sess, padding_secs=60):
     """使用 ONNX Encoder 获取 LLM 嵌入和 CTC 特征，支持自动 Padding"""
     
     # Check expected input type
@@ -86,10 +86,9 @@ def encode_audio(audio, encoder_sess, padding_secs=2):
     # Padding logic
     actual_samples = len(audio)
     
-    # [Optimize] 检测 Provider，如果是 CPU，跳过固定长度 Padding (因为 CPU 不存在 DML 的重编译开销)
+    # [Optimize] 检测 Provider，如果是 CPU，就按最低限度填充 Padding (因为 CPU 不存在 DML 的重编译开销)
     if encoder_sess.get_providers()[0] == 'CPUExecutionProvider':
-        print('用 cpu ，不填充')
-        padding_secs = 0
+        padding_secs = 1
         
     target_samples = int(padding_secs * 16000)
     

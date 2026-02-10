@@ -1,8 +1,10 @@
 import sys
 import os
 import ctypes
+import codecs
 import numpy as np
 import gguf
+from typing import List, Union
 from pathlib import Path
 from os.path import relpath
 from . import logger
@@ -152,7 +154,7 @@ def init_llama_lib():
     global llama_model_default_params, llama_model_load_from_file, llama_model_free, llama_model_get_vocab
     global llama_context_default_params, llama_init_from_model, llama_free
     global llama_batch_init, llama_batch_free
-    global llama_decode, llama_get_logits, llama_tokenize
+    global llama_decode, llama_get_logits, llama_get_embeddings, llama_tokenize
     global llama_get_memory, llama_memory_clear, llama_model_n_embd
     global llama_vocab_n_tokens, llama_vocab_eos, llama_token_to_piece
     global llama_sampler_chain_default_params, llama_sampler_chain_init, llama_sampler_chain_add
@@ -181,40 +183,29 @@ def init_llama_lib():
         GGML_BASE_DLL = "libggml-base.so"
         LLAMA_DLL = "libllama.so"
 
-    original_cwd = os.getcwd()
-    os.chdir(lib_dir)
+    ggml = ctypes.CDLL(os.path.join(lib_dir, GGML_DLL))
+    ggml_base = ctypes.CDLL(os.path.join(lib_dir, GGML_BASE_DLL))
+    llama = ctypes.CDLL(os.path.join(lib_dir, LLAMA_DLL))
+
+    # 设置日志回调
+    LOG_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
+    llama_log_set = llama.llama_log_set
+    llama_log_set.argtypes = [LOG_CALLBACK, ctypes.c_void_p]
+    llama_log_set.restype = None
     
-    # Windows DLL directory treatment
-    if sys.platform == "win32" and hasattr(os, 'add_dll_directory'):
-        os.add_dll_directory(lib_dir)
+    # 默认开启日志路由
+    configure_logging(quiet=QUIET_LOGS)
 
-    try:
-        ggml = ctypes.CDLL(os.path.join(lib_dir, GGML_DLL))
-        ggml_base = ctypes.CDLL(os.path.join(lib_dir, GGML_BASE_DLL))
-        llama = ctypes.CDLL(os.path.join(lib_dir, LLAMA_DLL))
+    # 加载后端
+    ggml_backend_load_all = ggml.ggml_backend_load_all
+    ggml_backend_load_all.argtypes = []
+    ggml_backend_load_all.restype = None
+    ggml_backend_load_all()
 
-        # 设置日志回调
-        LOG_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
-        llama_log_set = llama.llama_log_set
-        llama_log_set.argtypes = [LOG_CALLBACK, ctypes.c_void_p]
-        llama_log_set.restype = None
-        
-        # 默认开启日志路由
-        configure_logging(quiet=QUIET_LOGS)
-
-        # 加载后端
-        ggml_backend_load_all = ggml.ggml_backend_load_all
-        ggml_backend_load_all.argtypes = []
-        ggml_backend_load_all.restype = None
-        ggml_backend_load_all()
-
-        llama_backend_init = llama.llama_backend_init
-        llama_backend_init.argtypes = []
-        llama_backend_init.restype = None
-        llama_backend_init()
-
-    finally:
-        os.chdir(original_cwd)
+    llama_backend_init = llama.llama_backend_init
+    llama_backend_init.argtypes = []
+    llama_backend_init.restype = None
+    llama_backend_init()
 
     # 绑定其他函数
     llama_backend_free = llama.llama_backend_free
@@ -272,6 +263,10 @@ def init_llama_lib():
     llama_get_logits = llama.llama_get_logits
     llama_get_logits.argtypes = [ctypes.c_void_p]
     llama_get_logits.restype = ctypes.POINTER(ctypes.c_float)
+
+    llama_get_embeddings = llama.llama_get_embeddings
+    llama_get_embeddings.argtypes = [ctypes.c_void_p]
+    llama_get_embeddings.restype = ctypes.POINTER(ctypes.c_float)
 
     # Tokenize
     llama_tokenize = llama.llama_tokenize
@@ -353,41 +348,47 @@ def init_llama_lib():
         # 版本较旧的 llama.cpp 可能没有这些导出
         logger.warning("llama.cpp 库中缺少原生采样 API，将无法使用原生采样优化。")
 
-def load_model(model_path: str, n_gpu_layers: int = -1):
-    """加载 GGUF 模型（包含环境优化和错误排查日志）"""
-    init_llama_lib()
+
+def load_model(model_path: str):
+    """
+    加载 GGUF 模型（自动处理初始化和路径编码）
     
-    lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
-    model_path_obj = Path(model_path).resolve()
-    
-    # 计算相对于 bin 的路径，有些情况下 dll 寻找模型用相对路径更稳
-    try:
-        model_rel = relpath(model_path_obj, lib_dir)
-    except ValueError:
-        model_rel = model_path_obj.as_posix()
-
-    model_params = llama_model_default_params()
-    if n_gpu_layers != -1:
-        model_params.n_gpu_layers = n_gpu_layers
-
-    # 如果在 Windows 上，临时切目录以确保模型加载器能找到一些奇怪的路径
-    original_cwd = os.getcwd()
-    os.chdir(lib_dir)
-    try:
-        model = llama_model_load_from_file(
-            model_rel.encode('utf-8'),
-            model_params
-        )
-    finally:
-        os.chdir(original_cwd)
-
-    if not model:
-        logger.error(f"模型加载失败: {model_path_obj}")
-        logger.error(f"当前工作目录: {original_cwd}")
-        logger.error(f"模型是否存在: {model_path_obj.exists()}")
-        return None
+    Args:
+        model_path: GGUF 模型文件路径
         
-    return model
+    Returns:
+        model: llama_model 指针
+    """
+    lib_dir = Path(__file__).parent / 'bin'
+    model_path = Path(model_path)
+    model_rel = Path(relpath(model_path, lib_dir))
+
+    # 跳转到 dll 所在目录，并将其加到 Path
+    original_cwd = Path.cwd()
+    os.chdir(lib_dir)
+    if hasattr(os, 'add_dll_directory'):
+        os.add_dll_directory(os.getcwd())
+    os.environ['PATH'] = os.getcwd() + os.pathsep + os.environ['PATH']
+    logger.info(f"Changed directory to: {Path.cwd()}")
+
+    # 初始化 backend，载入模型
+    init_llama_lib()
+    model_params = llama_model_default_params()
+    model = llama_model_load_from_file(
+        model_rel.as_posix().encode('utf-8'),
+        model_params
+    )
+
+    if model:
+        os.chdir(original_cwd)
+        logger.info(f"Restored directory to: {Path.cwd()}")
+        return model
+    else:
+        logger.error(f'当前路径：{Path.cwd()}')
+        logger.error(f'模型绝对路径：{model_path.as_posix()}')
+        logger.error(f'模型可访问性：{model_path.exists()}')
+        logger.error(f"模型加载失败: {model_path}")
+        return None
 
 def create_context(model, n_ctx=2048, n_batch=2048, n_ubatch=512, n_seq_max=1, 
                    embeddings=False, pooling_type=0, flash_attn=True, 
@@ -416,43 +417,47 @@ def create_context(model, n_ctx=2048, n_batch=2048, n_ubatch=512, n_seq_max=1,
 class LlamaModel:
     """模型的面向对象封装"""
     def __init__(self, path, n_gpu_layers=-1):
-        init_llama_lib()
-        self.path = path
-        self.params = llama_model_default_params()
-        if n_gpu_layers != -1:
-            self.params.n_gpu_layers = n_gpu_layers
-        
-        lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
-        model_path_obj = Path(path).resolve()
-        try:
-            model_rel = relpath(model_path_obj, lib_dir)
-        except ValueError:
-            model_rel = model_path_obj.as_posix()
 
-        original_cwd = os.getcwd()
-        os.chdir(lib_dir)
-        try:
-            self.ptr = llama_model_load_from_file(model_rel.encode('utf-8'), self.params)
-        finally:
-            os.chdir(original_cwd)
-
-        if not self.ptr:
-            raise RuntimeError(f"模型加载失败: {path}")
+        self.model = load_model(path)
             
-        self.vocab = llama_model_get_vocab(self.ptr)
-        self.n_embd = llama_model_n_embd(self.ptr)
+        self.vocab = llama_model_get_vocab(self.model)
+        self.n_embd = llama_model_n_embd(self.model)
         self.eos_token = llama_vocab_eos(self.vocab)
 
-    def tokenize(self, text, add_special=False, parse_special=True):
-        return text_to_tokens(self.vocab, text)
+    def tokenize(self, text: str, add_special: bool = False, parse_special: bool = True) -> List[int]:
+        """(Native) 文本转 Token ID 列表"""
+        return text_to_tokens(self.vocab, text, add_special, parse_special)
 
-    def token_to_bytes(self, token_id):
+    def detokenize(self, tokens: List[int]) -> str:
+        """(Native) Token ID 列表转文本"""
+        if not tokens: return ""
+        all_bytes = b"".join([self.token_to_bytes(tid) for tid in tokens])
+        return all_bytes.decode('utf-8', errors='replace')
+
+    def token_to_bytes(self, token_id: int) -> bytes:
+        """(Native) 单个 Token 转字节"""
         return token_to_bytes(self.vocab, token_id)
+        
+    def token_to_piece(self, token_id: int) -> str:
+        """(Native) 单个 Token 转字符串 Piece"""
+        return self.token_to_bytes(token_id).decode('utf-8', errors='replace')
+
+    def token_bos(self) -> int:
+        return llama_vocab_bos(self.vocab)
+
+    def token_eos(self) -> int:
+        return llama_vocab_eos(self.vocab)
+        
+    def token_to_id(self, text: str) -> int:
+        """(Native) 单个 Token 字符串转 ID (仅限 Exact Match)"""
+        # 利用 tokenize 来查找 ID
+        res = self.tokenize(text, add_special=False, parse_special=True)
+        return res[0] if res else -1
 
     def __del__(self):
-        if hasattr(self, 'ptr') and self.ptr:
-            llama_model_free(self.ptr)
-            self.ptr = None
+        if hasattr(self, 'ptr') and self.model:
+            llama_model_free(self.model)
+            self.model = None
 
 class LlamaContext:
     """上下文的面向对象封装"""
@@ -478,7 +483,7 @@ class LlamaContext:
             params.n_threads = os.cpu_count() // 2
             params.n_threads_batch = os.cpu_count()
 
-        self.ptr = llama_init_from_model(model.ptr, params)
+        self.ptr = llama_init_from_model(model.model, params)
         if not self.ptr:
             raise RuntimeError("上下文初始化失败")
 
@@ -652,24 +657,25 @@ class LlamaSampler:
 
     def __del__(self):
         self.free()
-
-
+        
 class ASRStreamDecoder:
     """ASR 专属流式解码器，集成字节解码与 ASRReporter 交互"""
     def __init__(self, vocab, reporter=None):
         self.vocab = vocab
         self.reporter = reporter
-        self.byte_decoder = ByteDecoder()
+        self.byte_decoder = codecs.getincrementaldecoder("utf-8")(errors='replace')
         self.generated_text = ""
         self.tokens_generated = 0
+        self.tokens = []
 
     def push(self, token_id: int):
         """推入 Token，返回新解码的文字片段"""
         raw_bytes = token_to_bytes(self.vocab, token_id)
-        text_piece = self.byte_decoder.decode(raw_bytes)
+        text_piece = self.byte_decoder.decode(raw_bytes, final=False)
+        self.tokens.append(text_piece)
+        self.tokens_generated += 1
         
         self.generated_text += text_piece
-        self.tokens_generated += 1
         
         if self.reporter:
             self.reporter.stream(text_piece)
@@ -678,10 +684,10 @@ class ASRStreamDecoder:
 
     def flush(self):
         """清空残余字节并返回"""
-        remaining = self.byte_decoder.flush()
+        remaining = self.byte_decoder.decode(b"", final=True)
+        self.tokens.append(remaining)
         self.generated_text += remaining
         return remaining
-
 
 def python_log_callback(level, message, user_data):
     """
@@ -728,36 +734,6 @@ def configure_logging(quiet=False):
 # =========================================================================
 # Utilities
 # =========================================================================
-
-class ByteDecoder:
-    def __init__(self):
-        self.buffer = b""
-    
-    def decode(self, raw_bytes):
-        self.buffer += raw_bytes
-        result = ""
-        while self.buffer:
-            try:
-                result += self.buffer.decode('utf-8')
-                self.buffer = b""
-                break
-            except UnicodeDecodeError as e:
-                if e.reason == 'unexpected end of data' or 'invalid continuation' in e.reason:
-                    if e.start > 0:
-                        result += self.buffer[:e.start].decode('utf-8', errors='replace')
-                        self.buffer = self.buffer[e.start:]
-                    break
-                else:
-                    result += self.buffer[:1].decode('utf-8', errors='replace')
-                    self.buffer = self.buffer[1:]
-        return result
-    
-    def flush(self):
-        if self.buffer:
-            result = self.buffer.decode('utf-8', errors='replace')
-            self.buffer = b""
-            return result
-        return ""
 
 def text_to_tokens(vocab, text):
     text_bytes = text.encode("utf-8")

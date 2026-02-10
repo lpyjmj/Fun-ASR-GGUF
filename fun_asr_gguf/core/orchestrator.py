@@ -42,12 +42,14 @@ class TranscriptionOrchestrator:
 
                 # 1. Load Audio
                 reporter.print("\n[1] 加载音频...")
+                t_load_s = time.perf_counter()
                 audio = load_audio(
                     audio_path, 
                     self.models.config.sample_rate, 
                     start_second=start_second, 
                     duration=duration
                 )
+                result.timings.load_audio = time.perf_counter() - t_load_s
                 
                 audio_duration = len(audio) / self.models.config.sample_rate
                 reporter.print(f"    音频长度: {audio_duration:.2f}s")
@@ -55,6 +57,9 @@ class TranscriptionOrchestrator:
                     reporter.print(f"    起始偏移: {start_second:.2f}s")
 
                 base_offset = start_second if start_second else 0.0
+                
+                # 开始记录核心处理耗时
+                t_proc_start = time.perf_counter()
 
                 # 2. Strategy Selection
                 if audio_duration <= segment_size + 2.0:
@@ -64,7 +69,7 @@ class TranscriptionOrchestrator:
                     self._transcribe_long(audio, result, language, context, verbose, segment_size, overlap, reporter, base_offset,
                                           temperature=temperature, top_p=top_p, top_k=top_k)
 
-                result.timings.total = time.perf_counter() - t_start
+                result.timings.total = time.perf_counter() - t_proc_start
                 self._print_stats(reporter, result)
 
                 # 3. Export SRT
@@ -98,7 +103,10 @@ class TranscriptionOrchestrator:
                       'ctc_infer', 'ctc_decode', 'hotword_verify',
                       'ctc_cast', 'ctc_argmax', 'ctc_loop']:
             if hasattr(d_res.timings, field):
-                setattr(result.timings, field, getattr(d_res.timings, field))
+                # Don't overwrite if already set (like load_audio which is set in parent)
+                val = getattr(d_res.timings, field)
+                if val > 0 or not hasattr(result.timings, field) or getattr(result.timings, field) == 0:
+                    setattr(result.timings, field, val)
         
         result.text = d_res.text
         result.segments = []
@@ -193,9 +201,11 @@ class TranscriptionOrchestrator:
                        f"(Infer: {result.timings.ctc_infer*1000:.0f}ms, "
                        f"Dec: {result.timings.ctc_decode*1000:.0f}ms, "
                        f"HW: {getattr(result.timings, 'hotword_verify', 0)*1000:.0f}ms)")
+        reporter.print(f"  - Prompt:    {result.timings.prepare*1000:5.0f}ms")
         reporter.print(f"  - LLM读取：  {result.timings.inject*1000:5.0f}ms")
         reporter.print(f"  - LLM生成：  {result.timings.llm_generate*1000:5.0f}ms")
-        reporter.print(f"  - 总耗时：   {result.timings.total:5.2f}s\n")
+        reporter.print(f"  - 时间对齐： {result.timings.align*1000:5.0f}ms")
+        reporter.print(f"  - 推理总计： {result.timings.total:5.2f}s\n")
 
     def _print_performance_stats(self, reporter, d_res, audio, t_inject, t_llm):
         stats = Statistics(

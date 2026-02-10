@@ -105,7 +105,7 @@ def main():
         print(f"\n[1/2] Exporting Paddable Encoder-Adaptor (Dynamo=True)...")
         # Use the upgraded Paddable Wrapper
         enc_wrapper = model_def.EncoderExportWrapperPaddable(hybrid, stft, fbank).eval()
-        dummy_samples = SAMPLE_RATE * 5
+        dummy_samples = SAMPLE_RATE * 1
         audio = torch.randn(1, 1, dummy_samples)
         ilens = torch.tensor([dummy_samples], dtype=torch.long)
         

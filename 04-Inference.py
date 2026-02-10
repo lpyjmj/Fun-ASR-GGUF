@@ -3,20 +3,24 @@ ASR 演示脚本 - 简单直接的使用示例
 """
 
 import os
+import time
+import threading
+import psutil
+from pydub import AudioSegment
 from fun_asr_gguf import create_asr_engine
 
 
 # ==================== Vulkan 选项 ====================
 
-os.environ["VK_ICD_FILENAMES"] = "none"       # 禁止 Vulkan
-os.environ["GGML_VK_VISIBLE_DEVICES"] = "0"   # 禁止 Vulkan 用独显（强制用集显）
-os.environ["GGML_VK_DISABLE_F16"] = "1"       # 禁止 VulkanFP16 计算（Intel集显fp16有溢出问题）
+# os.environ["VK_ICD_FILENAMES"] = "none"       # 禁止 Vulkan
+# os.environ["GGML_VK_VISIBLE_DEVICES"] = "0"   # 禁止 Vulkan 用独显（强制用集显）
+# os.environ["GGML_VK_DISABLE_F16"] = "1"       # 禁止 VulkanFP16 计算（Intel集显fp16有溢出问题）
 
 
 # ==================== 配置区域 ====================
 
 # 音频文件路径
-audio_file = "input.mp3"
+audio_file = "vad_example.wav"
 
 # 语言设置（None=自动检测, "中文", "英文", "日文" 等）
 language = None
@@ -54,6 +58,58 @@ Fun-ASR-MLT-Nano-2512
     斯洛伐克语、斯洛文尼亚语、瑞典语 
 """
 
+# ==================== 监控工具 ====================
+
+class MemoryMonitor:
+    def __init__(self, interval=0.1):
+        self.interval = interval
+        self.running = False
+        self.peak_memory = 0
+        self.thread = None
+        self.process = psutil.Process(os.getpid())
+
+    def start(self):
+        self.running = True
+        self.peak_memory = self.process.memory_info().rss
+        self.thread = threading.Thread(target=self._monitor)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        return self.peak_memory
+
+    def _monitor(self):
+        while self.running:
+            try:
+                current_memory = self.process.memory_info().rss
+                if current_memory > self.peak_memory:
+                    self.peak_memory = current_memory
+                time.sleep(self.interval)
+            except Exception:
+                break
+
+def format_size(bytes_val):
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if bytes_val < 1024.0:
+            return f"{bytes_val:.2f} {unit}"
+        bytes_val /= 1024.0
+    return f"{bytes_val:.2f} PB"
+
+def get_device_info():
+    """推断当前的计算设备"""
+    # 检查是否显式禁用了 Vulkan
+    if os.environ.get("VK_ICD_FILENAMES") == "none":
+        return "CPU"
+    
+    # 检查是否强制指定了设备（通常也是启用 Vulkan）
+    if os.environ.get("GGML_VK_VISIBLE_DEVICES") == "0":
+        return "GPU (Vulkan - Device 0)"
+
+    # 默认情况
+    return "GPU (Vulkan)"
+
 # ==================== 执行区域 ====================
 
 def main():
@@ -84,6 +140,14 @@ def main():
         duration=5.0,
     )
 
+    print(f'\n开始正式转录...\n')
+    
+    # 启动内存监控
+    monitor = MemoryMonitor()
+    monitor.start()
+    
+    start_time = time.time()
+    
     result = engine.transcribe(
         audio_file, 
         language=language, 
@@ -92,10 +156,40 @@ def main():
         segment_size=60.0,
         overlap=4.0,
         start_second=0.0,
-        duration=60.0,
+        # duration=60.0,  # 暂时不要限制音频时长60s
         srt=True, 
         temperature=0.4
     )
+    
+    end_time = time.time()
+    peak_memory = monitor.stop()
+    
+    # 计算统计信息
+    total_time = end_time - start_time
+    audio_duration = 0.0
+    
+    # 尝试从结果中获取音频时长（如果有），或者使用预设的60s（如果转录的是整段）
+    # 注意：engine.transcribe 返回的 result 是一个 dict，通常包含 text, timestamps 等
+    # 这里我们简单地使用 time.time 差值作为处理时间，
+    # 音频时长我们可以尝试从 result 中推断，或者如果 result 没包含总时长，就只能手动指定或解析音频文件
+    # FunASR-GGUF 的 transcribe 可能会在日志里打印音频长度，但 result 结构需要确认
+    # 我们这里直接使用 60.0 或者尝试读取 result
+    
+    # 获取音频实际时长用于计算 RTF
+    audio_duration = AudioSegment.from_file(audio_file).duration_seconds
+    
+    rtf = total_time / audio_duration if audio_duration > 0 else 0
+    device_info = get_device_info()
+    
+    print("\n" + "="*70)
+    print("性能监控报告")
+    print("="*70)
+    print(f"音频时长:     {audio_duration:.2f} s")
+    print(f"转录耗时:     {total_time:.2f} s")
+    print(f"RTF (实时率): {rtf:.4f}")
+    print(f"峰值内存:     {format_size(peak_memory)}")
+    print(f"推理设备:     {device_info}")
+    print("="*70 + "\n")
 
     # 输出结果
     if json_output:
